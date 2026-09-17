@@ -1,0 +1,22 @@
+# Run the live-supervisor fork on top of an existing Dograh install without
+# editing that install. Only the api and ui images change; volumes, networks,
+# .env and every other service come from the original compose file.
+#
+# Build the images from the repo root first:
+#   docker build -f api/Dockerfile -t dograh-api:interject .
+#   docker build -f ui/Dockerfile  -t dograh-ui:interject  .
+#
+# Deploy (recreates only api and ui):
+#   docker compose -p dograh -f C:\SlashLLM\dograh\docker-compose.yaml \
+#     -f C:\SlashLLM\dograh-interject\deploy\local-interject\docker-compose.override.yaml \
+#     up -d --no-deps api ui
+#
+# Roll back to the stock images:
+#   docker compose -p dograh -f C:\SlashLLM\dograh\docker-compose.yaml up -d --no-deps api ui
+services:
+  api:
+    image: dograh-api:interject
+    pull_policy: never
+  ui:
+    image: dograh-ui:interject
+    pull_policy: never
