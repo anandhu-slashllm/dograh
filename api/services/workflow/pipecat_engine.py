@@ -20,6 +20,10 @@ from pipecat.frames.frames import (
     FunctionCallResultProperties,
     LLMContextFrame,
     TTSSpeakFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -82,6 +86,9 @@ from api.services.workflow.tools.knowledge_base import (
 from api.utils.template_renderer import render_template
 
 CALL_STATUS_CONTEXT_KEY = "call_status"
+
+# Realtime feedback event recorded when a supervisor adds or clears notes.
+SUPERVISOR_NOTE_EVENT_TYPE = "rtf-supervisor-note"
 
 # Gathered-context keys the engine records itself. Variable extraction merges
 # its results into the same dict, so these are held back from that merge.
@@ -233,6 +240,18 @@ class PipecatEngine:
         self._context_summarization_manager: Optional[ContextSummarizationManager] = (
             None
         )
+
+        # Live supervisor notes, folded into every node's system prompt so they
+        # survive node transitions and context summarization.
+        self._supervisor_notes: list[dict] = []
+        self._user_is_speaking: bool = False
+        # An immediate reply is only triggered for STT/LLM/TTS pipelines. For
+        # speech-to-speech services a prompt change can force a reconnect, so
+        # notes there wait for the next natural turn.
+        self._supervisor_respond_now_supported: bool = True
+        self._supervisor_event_callback: Optional[
+            Callable[[dict], Awaitable[None]]
+        ] = None
 
     async def _get_organization_id(self) -> Optional[int]:
         """Get and cache the organization ID from workflow run."""
@@ -714,17 +733,97 @@ class PipecatEngine:
             await self._register_knowledge_base_function(node.document_uuids)
 
         # Compose prompt and functions via the context composer module
-        system_prompt = compose_system_prompt_for_node(
-            node=node,
-            workflow=self.workflow,
-            format_prompt=self._format_prompt,
-            has_recordings=self._has_recordings,
-        )
+        system_prompt = self._compose_system_prompt(node)
         functions = await compose_functions_for_node(
             node=node,
             custom_tool_manager=self._custom_tool_manager,
         )
         await self._update_llm_context(system_prompt, functions)
+
+    def _compose_system_prompt(self, node: Node) -> str:
+        return compose_system_prompt_for_node(
+            node=node,
+            workflow=self.workflow,
+            format_prompt=self._format_prompt,
+            has_recordings=self._has_recordings,
+            supervisor_notes=self._supervisor_notes,
+        )
+
+    def set_supervisor_event_callback(
+        self, callback: Optional[Callable[[dict], Awaitable[None]]]
+    ) -> None:
+        """Set where supervisor-note events go (live view and run logs)."""
+        self._supervisor_event_callback = callback
+
+    def set_supervisor_respond_now_supported(self, supported: bool) -> None:
+        self._supervisor_respond_now_supported = supported
+
+    def _is_idle_for_supervisor_reply(self) -> bool:
+        return (
+            not self._bot_is_speaking
+            and not self._user_is_speaking
+            and self._queued_speech_mute_state == "idle"
+            and not self._mute_pipeline
+            and not self._call_disposed
+        )
+
+    async def set_supervisor_notes(
+        self,
+        notes: Sequence[dict],
+        *,
+        change: Optional[str] = None,
+        note: Optional[dict] = None,
+        respond_now: bool = False,
+    ) -> None:
+        """Replace the live supervisor notes and apply them to the current node.
+
+        Only the system instruction is updated; tools stay registered as they
+        are. With ``respond_now`` the agent replies immediately when neither
+        party is speaking; otherwise the notes take effect on its next reply.
+        """
+        self._supervisor_notes = [dict(n) for n in notes]
+
+        if self._current_node is not None and self.llm is not None:
+            system_prompt = self._compose_system_prompt(self._current_node)
+            await self.llm._update_settings(
+                LLMSettings(system_instruction=system_prompt)
+            )
+
+        responded = False
+        deferred_reason: Optional[str] = None
+        if respond_now:
+            if not self._supervisor_respond_now_supported:
+                deferred_reason = "unsupported"
+            elif not self._is_idle_for_supervisor_reply():
+                deferred_reason = "busy"
+            elif self.llm is None or self.context is None:
+                deferred_reason = "not_ready"
+            else:
+                await self.llm.queue_frame(LLMContextFrame(self.context))
+                responded = True
+
+        logger.info(
+            f"Applied {len(self._supervisor_notes)} supervisor note(s) "
+            f"(change={change}, respond_now={respond_now}, responded={responded})"
+        )
+
+        if self._supervisor_event_callback and change:
+            payload = {
+                "change": change,
+                "text": (note or {}).get("text"),
+                "note_id": (note or {}).get("id"),
+                "active_notes": len(self._supervisor_notes),
+                "respond_now": respond_now,
+                "responded": responded,
+            }
+            if deferred_reason:
+                payload["deferred_reason"] = deferred_reason
+            try:
+                await self._supervisor_event_callback(
+                    {"type": SUPERVISOR_NOTE_EVENT_TYPE, "payload": payload}
+                )
+            except Exception as e:
+                logger.debug(f"Failed to record supervisor note event: {e}")
 
     async def set_node(self, node_id: str, emit_transition_event: bool = True):
         """
@@ -1186,6 +1285,12 @@ class PipecatEngine:
                 self._queued_speech_mute_state = "playing"
             self._speech_playback_started.set()
             self._speech_playback_finished.clear()
+        # The aggregator broadcasts UserStarted/StoppedSpeakingFrame itself, so
+        # this callback mostly sees the VAD frames; both mean the same here.
+        elif isinstance(frame, (UserStartedSpeakingFrame, VADUserStartedSpeakingFrame)):
+            self._user_is_speaking = True
+        elif isinstance(frame, (UserStoppedSpeakingFrame, VADUserStoppedSpeakingFrame)):
+            self._user_is_speaking = False
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_is_speaking = False
             self._queued_speech_mute_state = "idle"

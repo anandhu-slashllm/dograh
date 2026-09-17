@@ -75,6 +75,8 @@ from api.services.pipecat.transcript_log_coordinator import TranscriptLogCoordin
 from api.services.pipecat.transport_setup import create_webrtc_transport
 from api.services.pipecat.worker_runner import run_pipeline_worker
 from api.services.pipecat.ws_sender_registry import get_ws_sender
+from api.services.supervisor.listener import SupervisorListener
+from api.services.supervisor.live_events import LiveEventPublisher, mirror_ws_sender
 from api.services.telephony import registry as telephony_registry
 from api.services.workflow.dto import ReactFlowDTO
 from api.services.workflow.initial_context import merge_external_initial_context
@@ -780,7 +782,10 @@ async def _run_pipeline_impl(
     in_memory_logs_buffer = InMemoryLogsBuffer(workflow_run_id)
 
     # Create node transition callback (always logs to buffer, optionally streams to WS)
-    ws_sender = get_ws_sender(workflow_run_id)
+    # Every live event is also mirrored to Redis for the supervisor console, so
+    # the sender is always set -- telephony calls included.
+    live_event_publisher = LiveEventPublisher(workflow_run_id)
+    ws_sender = mirror_ws_sender(get_ws_sender(workflow_run_id), live_event_publisher)
 
     async def send_node_transition(
         node_id: str,
@@ -1172,13 +1177,38 @@ async def _run_pipeline_impl(
 
     register_audio_data_handler(audio_buffer, workflow_run_id, in_memory_audio_buffer)
 
+    # Live supervisor notes: record note events like node transitions (live
+    # view + run logs) and keep the engine in sync with the stored notes.
+    async def send_supervisor_event(message: dict) -> None:
+        try:
+            await ws_sender(
+                {
+                    **message,
+                    "node_id": in_memory_logs_buffer.current_node_id,
+                    "node_name": in_memory_logs_buffer.current_node_name,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to send supervisor event via WebSocket: {e}")
+        try:
+            await in_memory_logs_buffer.append(message)
+        except Exception as e:
+            logger.error(f"Failed to append supervisor event to logs buffer: {e}")
+
+    engine.set_supervisor_event_callback(send_supervisor_event)
+    engine.set_supervisor_respond_now_supported(not is_realtime)
+    supervisor_listener = SupervisorListener(engine, workflow_run_id)
+
     try:
+        await supervisor_listener.start()
         # Run the pipeline
         await run_pipeline_worker(task)
         logger.info(f"Task completed for run {workflow_run_id}")
     except asyncio.CancelledError:
         logger.warning("Received CancelledError in _run_pipeline")
     finally:
+        await supervisor_listener.stop()
+        await live_event_publisher.close()
         # Close MCP sessions here, not in engine.cleanup(). The anyio cancel
         # scopes opened by MCPClient.start() in engine.initialize() are
         # task-affine; this finally runs in the same task as initialize(),

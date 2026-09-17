@@ -15,6 +15,33 @@ function feedbackEventText(event: RealtimeFeedbackEvent) {
     );
 }
 
+interface SupervisorNoteDetails {
+    change?: string;
+    text?: string;
+    respondNow?: boolean;
+    responded?: boolean;
+    deferredReason?: string;
+}
+
+const DEFERRED_REASON_TEXT: Record<string, string> = {
+    busy: "someone was speaking, so it applies on the agent's next reply",
+    unsupported: "this voice model can't reply on demand, so it applies on the agent's next reply",
+    not_ready: "the call wasn't ready yet, so it applies on the agent's next reply",
+};
+
+export function supervisorNoteNotice(details: SupervisorNoteDetails) {
+    if (details.change === "cleared") {
+        return { title: "Supervisor cleared all notes", text: "" };
+    }
+    let title = "Supervisor note";
+    if (details.respondNow) {
+        title = details.responded
+            ? "Supervisor note · agent responding now"
+            : `Supervisor note · ${DEFERRED_REASON_TEXT[details.deferredReason ?? ""] ?? "applies on the agent's next reply"}`;
+    }
+    return { title, text: details.text ?? "" };
+}
+
 function liveFeedbackItem(message: RealtimeFeedbackMessage, reasoningDurationMs?: number): ConversationItem | null {
     if (message.type === "ttfb-metric") {
         return null;
@@ -92,6 +119,22 @@ function liveFeedbackItem(message: RealtimeFeedbackMessage, reasoningDurationMs?
             title: message.fatal ? "Fatal Pipeline Error" : "Pipeline Error",
             text: message.text,
             fatal: message.fatal,
+        };
+    }
+
+    if (message.type === "supervisor-note") {
+        return {
+            kind: "notice",
+            id: message.id,
+            timestamp: message.timestamp,
+            tone: "supervisor",
+            ...supervisorNoteNotice({
+                change: message.supervisorChange,
+                text: message.text,
+                respondNow: message.supervisorRespondNow,
+                responded: message.supervisorResponded,
+                deferredReason: message.supervisorDeferredReason,
+            }),
         };
     }
 
@@ -275,6 +318,23 @@ export function conversationItemsFromRealtimeFeedbackEvents(events: RealtimeFeed
                 title: event.payload.fatal ? "Fatal Pipeline Error" : "Pipeline Error",
                 text: feedbackEventText(event),
                 fatal: event.payload.fatal,
+            });
+            return;
+        }
+
+        if (event.type === "rtf-supervisor-note") {
+            items.push({
+                kind: "notice",
+                id: `supervisor-${event.turn}-${index}`,
+                timestamp: event.timestamp,
+                tone: "supervisor",
+                ...supervisorNoteNotice({
+                    change: event.payload.change,
+                    text: event.payload.text,
+                    respondNow: event.payload.respond_now,
+                    responded: event.payload.responded,
+                    deferredReason: event.payload.deferred_reason,
+                }),
             });
         }
     });

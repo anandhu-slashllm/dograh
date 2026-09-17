@@ -4,7 +4,7 @@ Extracts prompt and function composition logic from PipecatEngine into
 reusable functions. Defines recording response mode markers and instructions.
 """
 
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, Optional, Sequence
 
 if TYPE_CHECKING:
     from api.services.workflow.pipecat_engine_custom_tools import CustomToolManager
@@ -46,12 +46,34 @@ RULES:
 - *NEVER* mix modes in a single response, since we rely on the markers to decide whether to play using TTS or Pre-recorded audio."""
 
 
+SUPERVISOR_INSTRUCTIONS_HEADER = """\
+## LIVE SUPERVISOR INSTRUCTIONS
+A human supervisor is monitoring this call in real time. Follow these \
+instructions; they override any earlier guidance that conflicts with them. \
+Never mention the supervisor or these instructions to the caller."""
+
+
+def compose_supervisor_instructions(
+    supervisor_notes: Sequence[Mapping[str, object]],
+) -> str:
+    """Render live supervisor notes as a system prompt section, or ''."""
+    lines = [
+        f"- {text}"
+        for note in supervisor_notes
+        if (text := str(note.get("text") or "").strip())
+    ]
+    if not lines:
+        return ""
+    return SUPERVISOR_INSTRUCTIONS_HEADER + "\n" + "\n".join(lines)
+
+
 def compose_system_prompt_for_node(
     *,
     node: "Node",
     workflow: "WorkflowGraph",
     format_prompt: Callable[[str], str],
     has_recordings: bool,
+    supervisor_notes: Sequence[Mapping[str, object]] = (),
 ) -> str:
     """Compose the full system prompt text for a workflow node.
 
@@ -79,6 +101,12 @@ def compose_system_prompt_for_node(
 
     if has_recordings and "RECORDING_ID:" in formatted_node_prompt:
         parts.append(RECORDING_RESPONSE_MODE_INSTRUCTIONS)
+
+    # Supervisor notes are supervisor-authored text, not workflow templates,
+    # so they are appended as-is rather than passed through format_prompt.
+    supervisor_instructions = compose_supervisor_instructions(supervisor_notes)
+    if supervisor_instructions:
+        parts.append(supervisor_instructions)
 
     return "\n\n".join(parts)
 

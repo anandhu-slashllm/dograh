@@ -5,6 +5,11 @@ import { getTurnCredentialsApiV1TurnCredentialsGet, validateUserConfigurationsAp
 import { TurnCredentialsResponse } from "@/client/types.gen";
 import { WorkflowValidationError } from "@/components/flow/types";
 import type { ConversationNodeTransitionItem, RealtimeFeedbackMessage as FeedbackMessage } from "@/components/workflow/conversation";
+import {
+    applyRealtimeFeedbackEvent,
+    createLiveFeedbackState,
+    type LiveFeedbackState,
+} from "@/components/workflow/conversation/adapters/applyRealtimeFeedbackEvent";
 import { useAppConfig } from "@/context/AppConfigContext";
 import { resolveBrowserBackendUrl } from '@/lib/apiClient';
 import { detailFromError } from '@/lib/apiError';
@@ -110,11 +115,9 @@ export const useWebSocketRTC = ({ workflowId, workflowRunId, accessToken, initia
 
     const pc_id = useRef(generateSecureId());
 
-    // Mute/speaking state tracking refs (ephemeral signals, not rendered directly)
-    const userMutedRef = useRef(false);
-    const firstBotSpeechCompletedRef = useRef(false);
-    const currentAllowInterruptRef = useRef<boolean | undefined>(undefined);
-    const interruptWarningShownRef = useRef(false);
+    // Live transcript plus the mute/speaking signals it depends on. The ref is
+    // the source of truth; feedbackMessages mirrors its messages for rendering.
+    const feedbackStateRef = useRef<LiveFeedbackState>(createLiveFeedbackState());
 
     const getWebSocketUrl = useCallback(() => {
         // Single source of truth for the browser→API base URL: the centrally
@@ -422,203 +425,18 @@ export const useWebSocketRTC = ({ workflowId, workflowRunId, accessToken, initia
                             cleanupConnection({ graceful: true, status: 'idle' });
                             break;
 
-                        case 'rtf-user-transcription': {
-                            const transcription = message.payload;
-
-                            // Show one-time warning if user speaks while muted on a no-interrupt node
-                            // Skip during initial bot greeting (muted by MuteUntilFirstBotComplete strategy)
-                            if (
-                                !interruptWarningShownRef.current &&
-                                firstBotSpeechCompletedRef.current &&
-                                userMutedRef.current &&
-                                currentAllowInterruptRef.current === false
-                            ) {
-                                interruptWarningShownRef.current = true;
-                                setFeedbackMessages(prev => [...prev, {
-                                    id: `interrupt-warning-${Date.now()}`,
-                                    type: 'interrupt-warning',
-                                    text: 'Interruption is disabled for this step. The bot will finish speaking before processing your input. You can enable interruption in the workflow editor.',
-                                    timestamp: new Date().toISOString(),
-                                }]);
+                        default: {
+                            const update = applyRealtimeFeedbackEvent(feedbackStateRef.current, message);
+                            if (!update.handled) {
+                                logger.warn('Unknown message type:', message.type);
+                                break;
                             }
-
-                            setFeedbackMessages(prev => {
-                                // Step 1: Finalize the last bot message (user started speaking)
-                                const messagesWithBotFinalized = prev.map((msg, idx) => {
-                                    const isLastMessage = idx === prev.length - 1;
-                                    const isUnfinalizedBotMessage = msg.type === 'bot-text' && !msg.final;
-                                    return isLastMessage && isUnfinalizedBotMessage
-                                        ? { ...msg, final: true }
-                                        : msg;
-                                });
-
-                                // Step 2: Remove any previous interim transcription
-                                const messagesWithoutInterim = messagesWithBotFinalized.filter(
-                                    msg => !(msg.type === 'user-transcription' && !msg.final)
-                                );
-
-                                // Step 3: Add new transcription (interim or final)
-                                return [...messagesWithoutInterim, {
-                                    id: `user-${Date.now()}`,
-                                    type: 'user-transcription',
-                                    text: transcription.text,
-                                    final: transcription.final,
-                                    timestamp: new Date().toISOString(),
-                                }];
-                            });
-                            break;
-                        }
-
-                        case 'rtf-bot-text': {
-                            // TTS text comes as sentences/phrases, concatenate with space
-                            setFeedbackMessages(prev => {
-                                const last = prev[prev.length - 1];
-                                if (last && last.type === 'bot-text' && !last.final) {
-                                    // Append to existing bot message
-                                    return [
-                                        ...prev.slice(0, -1),
-                                        { ...last, text: last.text + ' ' + message.payload.text }
-                                    ];
-                                }
-                                // Start new bot message
-                                return [...prev, {
-                                    id: `bot-${Date.now()}`,
-                                    type: 'bot-text',
-                                    text: message.payload.text,
-                                    final: false,
-                                    timestamp: new Date().toISOString(),
-                                }];
-                            });
-                            break;
-                        }
-
-                        case 'rtf-function-call-start': {
-                            const { function_name, tool_call_id, arguments: toolArguments } = message.payload;
-                            setFeedbackMessages(prev => {
-                                // Check if we already have this function call
-                                const existingId = tool_call_id
-                                    ? `func-${tool_call_id}`
-                                    : `func-${Date.now()}`;
-                                if (prev.some(msg => msg.id === existingId)) {
-                                    return prev;
-                                }
-                                return [...prev, {
-                                    id: existingId,
-                                    type: 'function-call',
-                                    text: function_name ?? 'tool',
-                                    functionName: function_name ?? 'tool',
-                                    toolCallId: tool_call_id,
-                                    arguments: toolArguments,
-                                    status: 'running',
-                                    timestamp: new Date().toISOString(),
-                                }];
-                            });
-                            break;
-                        }
-
-                        case 'rtf-function-call-end': {
-                            const { tool_call_id, result } = message.payload;
-                            setFeedbackMessages(prev => prev.map(msg =>
-                                msg.id === `func-${tool_call_id}`
-                                    ? { ...msg, status: 'completed' as const, text: result || msg.text, result }
-                                    : msg
-                            ));
-                            break;
-                        }
-
-                        case 'rtf-node-transition': {
-                            const {
-                                node_id,
-                                node_name,
-                                previous_node_id,
-                                previous_node_name,
-                                allow_interrupt,
-                            } = message.payload;
-                            currentAllowInterruptRef.current = allow_interrupt;
-                            const transitionTimestamp = new Date().toISOString();
-                            const transition: ConversationNodeTransitionItem = {
-                                kind: 'node-transition',
-                                id: `node-${Date.now()}`,
-                                timestamp: transitionTimestamp,
-                                nodeId: node_id,
-                                nodeName: node_name ?? 'Node',
-                                previousNodeId: previous_node_id,
-                                previousNodeName: previous_node_name,
-                                allowInterrupt: allow_interrupt,
-                            };
-                            setFeedbackMessages(prev => [...prev, {
-                                id: transition.id,
-                                type: 'node-transition',
-                                text: transition.nodeName,
-                                nodeId: transition.nodeId,
-                                nodeName: transition.nodeName,
-                                previousNodeId: transition.previousNodeId,
-                                previousNode: previous_node_name,
-                                allowInterrupt: allow_interrupt,
-                                timestamp: transitionTimestamp,
-                            }]);
-                            onNodeTransitionRef.current?.(transition);
-                            break;
-                        }
-
-                        case 'rtf-ttfb-metric': {
-                            const { ttfb_seconds, processor, model } = message.payload;
-                            setFeedbackMessages(prev => [...prev, {
-                                id: `ttfb-${Date.now()}`,
-                                type: 'ttfb-metric',
-                                text: `${(ttfb_seconds * 1000).toFixed(0)}ms`,
-                                ttfbSeconds: ttfb_seconds,
-                                processor,
-                                model,
-                                timestamp: new Date().toISOString(),
-                            }]);
-                            break;
-                        }
-
-                        case 'rtf-pipeline-error': {
-                            const { error, fatal, processor: errorProcessor } = message.payload;
-                            setFeedbackMessages(prev => [...prev, {
-                                id: `error-${Date.now()}`,
-                                type: 'pipeline-error',
-                                text: error,
-                                fatal,
-                                processor: errorProcessor,
-                                timestamp: new Date().toISOString(),
-                            }]);
-                            break;
-                        }
-
-                        // Ephemeral state signals — update refs only, no UI messages
-                        case 'rtf-bot-started-speaking':
-                            break;
-
-                        case 'rtf-bot-stopped-speaking':
-                            if (!firstBotSpeechCompletedRef.current) {
-                                firstBotSpeechCompletedRef.current = true;
+                            feedbackStateRef.current = update.state;
+                            setFeedbackMessages(update.state.messages);
+                            if (update.nodeTransition) {
+                                onNodeTransitionRef.current?.(update.nodeTransition);
                             }
-                            // Finalize the last bot message so "speaking..." indicator is removed
-                            setFeedbackMessages(prev => {
-                                const lastIdx = prev.length - 1;
-                                const last = prev[lastIdx];
-                                if (last && last.type === 'bot-text' && !last.final) {
-                                    const updated = [...prev];
-                                    updated[lastIdx] = { ...last, final: true };
-                                    return updated;
-                                }
-                                return prev;
-                            });
-                            break;
-
-                        case 'rtf-user-mute-started':
-                            userMutedRef.current = true;
-                            break;
-
-                        case 'rtf-user-mute-stopped':
-                            userMutedRef.current = false;
-                            break;
-
-                        default:
-                            logger.warn('Unknown message type:', message.type);
+                        }
                     }
                 } catch (e) {
                     logger.error('Failed to handle WebSocket message:', e);

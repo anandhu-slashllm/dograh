@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ExternalLink, RefreshCw } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, ExternalLink, Radio, RefreshCw } from "lucide-react";
 import { useState } from "react";
 
 import { WorkflowRunResponseSchema } from "@/client/types.gen";
@@ -18,6 +18,7 @@ import {
     TableHeader,
     TableRow,
 } from "@/components/ui/table";
+import { WORKFLOW_RUN_MODES } from "@/constants/workflowRunModes";
 import { useOrganizationTimezone } from "@/hooks/useOrganizationTimezone";
 import { formatDateTime } from "@/lib/dateTime";
 import { ActiveFilter, FilterAttribute } from "@/types/filters";
@@ -211,6 +212,17 @@ export function WorkflowRunsTable({
                                             </TableCell>
                                             <TableCell>
                                                 <div className="flex space-x-2" onClick={(e) => e.stopPropagation()}>
+                                                    {!run.is_completed && run.mode !== WORKFLOW_RUN_MODES.TEXTCHAT && (
+                                                        <Button
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="gap-1.5"
+                                                            onClick={() => window.open(`/workflow/${workflowId}/run/${run.id}`, '_blank')}
+                                                        >
+                                                            <Radio className="h-4 w-4" />
+                                                            Monitor live
+                                                        </Button>
+                                                    )}
                                                     <MediaPreviewButton
                                                         recordingUrl={run.recording_url}
                                                         transcriptUrl={run.transcript_url}

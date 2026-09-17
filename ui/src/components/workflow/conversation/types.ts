@@ -7,7 +7,10 @@ export type RealtimeFeedbackMessageType =
     | "node-transition"
     | "ttfb-metric"
     | "pipeline-error"
-    | "interrupt-warning";
+    | "interrupt-warning"
+    | "supervisor-note";
+
+export type SupervisorNoteChange = "added" | "cleared";
 
 export interface RealtimeFeedbackMessage {
     id: string;
@@ -29,6 +32,10 @@ export interface RealtimeFeedbackMessage {
     processor?: string;
     model?: string;
     fatal?: boolean;
+    supervisorChange?: SupervisorNoteChange;
+    supervisorRespondNow?: boolean;
+    supervisorResponded?: boolean;
+    supervisorDeferredReason?: string;
 }
 
 export interface RealtimeFeedbackEvent {
@@ -54,6 +61,10 @@ export interface RealtimeFeedbackEvent {
         model?: string;
         error?: string;
         fatal?: boolean;
+        change?: SupervisorNoteChange;
+        respond_now?: boolean;
+        responded?: boolean;
+        deferred_reason?: string;
     };
     timestamp: string;
     turn: number;
@@ -98,7 +109,7 @@ export interface ConversationNodeTransitionItem extends ConversationItemBase {
 
 export interface ConversationNoticeItem extends ConversationItemBase {
     kind: "notice";
-    tone: "warning" | "error";
+    tone: "warning" | "error" | "supervisor";
     title: string;
     text: string;
     fatal?: boolean;

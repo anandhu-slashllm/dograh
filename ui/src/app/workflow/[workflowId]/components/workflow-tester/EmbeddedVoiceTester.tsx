@@ -1,11 +1,13 @@
 "use client";
 
-import { Loader2, Phone, RefreshCw } from "lucide-react";
+import { ChevronDown, Loader2, Phone, RefreshCw, UserRoundCog } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { RealtimeFeedback } from "@/components/workflow/conversation";
+import { SupervisorPanel, type SupervisorPanelHandle } from "@/components/workflow/supervisor/SupervisorPanel";
+import { cn } from "@/lib/utils";
 
 import { ApiKeyErrorDialog, ConnectionStatus, WorkflowConfigErrorDialog } from "../../run/[runId]/components";
 import { useWebSocketRTC } from "../../run/[runId]/hooks";
@@ -58,6 +60,16 @@ export function EmbeddedVoiceTester({
     });
     const autoStartedRef = useRef(false);
     const configRetriedRef = useRef(false);
+    const [supervisorOpen, setSupervisorOpen] = useState(false);
+    const supervisorPanelRef = useRef<SupervisorPanelHandle>(null);
+
+    // Supervisor notes arrive as transcript events; keep the panel's list in sync.
+    const supervisorNoteCount = feedbackMessages.filter((message) => message.type === "supervisor-note").length;
+    useEffect(() => {
+        if (supervisorNoteCount > 0) {
+            supervisorPanelRef.current?.refresh();
+        }
+    }, [supervisorNoteCount]);
 
     useEffect(() => {
         // Wait for appConfig (FORCE_TURN_RELAY) to finish loading before
@@ -151,6 +163,28 @@ export function EmbeddedVoiceTester({
                         isCallCompleted={isCompleted}
                     />
                 </div>
+
+                {connectionActive ? (
+                    <div className="border-t border-border/70 bg-background">
+                        <button
+                            type="button"
+                            onClick={() => setSupervisorOpen((open) => !open)}
+                            aria-expanded={supervisorOpen}
+                            className="flex w-full items-center justify-between px-4 py-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+                        >
+                            <span className="flex items-center gap-1.5">
+                                <UserRoundCog className="h-3.5 w-3.5" />
+                                Supervisor notes
+                            </span>
+                            <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", supervisorOpen && "rotate-180")} />
+                        </button>
+                        {supervisorOpen ? (
+                            <div className="max-h-[45vh] overflow-y-auto px-3 pb-3">
+                                <SupervisorPanel ref={supervisorPanelRef} runId={workflowRunId} />
+                            </div>
+                        ) : null}
+                    </div>
+                ) : null}
 
                 <div className="border-t border-border/70 bg-background px-4 py-3">
                     <div className="flex flex-col gap-3">

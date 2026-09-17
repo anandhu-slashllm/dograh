@@ -31,6 +31,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConversationRailFrame, RealtimeFeedback, WorkflowRunLogs } from '@/components/workflow/conversation';
+import { LiveCallMonitor } from '@/components/workflow/supervisor/LiveCallMonitor';
 import { PostHogEvent } from '@/constants/posthog-events';
 import { WORKFLOW_RUN_MODES } from '@/constants/workflowRunModes';
 import { useOrganizationTimezone } from '@/hooks/useOrganizationTimezone';
@@ -58,6 +59,8 @@ interface WorkflowRunResponse {
     annotations: Record<string, unknown> | null;
 }
 
+const LIVE_CALL_RELOAD_DELAY_MS = 3000;
+const LIVE_CALL_RELOAD_ATTEMPTS = 20;
 const RUN_SHELL_HEIGHT_CLASS = "h-[calc(100svh-49px)] min-h-[calc(100svh-49px)] max-h-[calc(100svh-49px)]";
 const WAVEFORM_BAR_COUNT = 96;
 type SplitTrackPlaybackMode = 'both' | 'user' | 'bot';
@@ -616,6 +619,8 @@ export default function WorkflowRunPage() {
     const organizationTimezone = useOrganizationTimezone();
     const [workflowRun, setWorkflowRun] = useState<WorkflowRunResponse | null>(null);
     const [workflowName, setWorkflowName] = useState<string | null>(null);
+    // Bumped after a live call ends, to reload the run once its details are saved.
+    const [reloadCount, setReloadCount] = useState(0);
     const customizeButtonRef = useRef<HTMLButtonElement>(null);
 
     // Redirect if not authenticated
@@ -631,8 +636,12 @@ export default function WorkflowRunPage() {
         const fetchWorkflowRun = async () => {
             if (!auth.isAuthenticated || auth.loading) return;
 
-            setIsLoading(true);
-            setWorkflowName(null);
+            // Reloads after a live call ends happen in place, without a skeleton.
+            const isReload = reloadCount > 0;
+            if (!isReload) {
+                setIsLoading(true);
+                setWorkflowName(null);
+            }
             const workflowId = Number(params.workflowId);
             const runId = Number(params.runId);
 
@@ -667,6 +676,7 @@ export default function WorkflowRunPage() {
                     annotations: runResponse.data?.annotations as Record<string, unknown> | null ?? null,
                 };
                 setWorkflowRun(runData);
+                if (isReload) return;
                 posthog.capture(PostHogEvent.WORKFLOW_RUN_DETAILS_VIEWED, {
                     workflow_id: workflowId,
                     workflow_name: workflowResponse.data?.name ?? null,
@@ -681,7 +691,18 @@ export default function WorkflowRunPage() {
             }
         };
         fetchWorkflowRun();
-    }, [params.workflowId, params.runId, auth]);
+    }, [params.workflowId, params.runId, auth, reloadCount]);
+
+    // After a live call ends, its run is marked completed once recordings and
+    // transcripts are saved. Poll briefly so the details view replaces the monitor.
+    const [liveCallEnded, setLiveCallEnded] = useState(false);
+    useEffect(() => {
+        if (!liveCallEnded || workflowRun?.is_completed || reloadCount >= LIVE_CALL_RELOAD_ATTEMPTS) {
+            return;
+        }
+        const timer = setTimeout(() => setReloadCount((count) => count + 1), LIVE_CALL_RELOAD_DELAY_MS);
+        return () => clearTimeout(timer);
+    }, [liveCallEnded, workflowRun?.is_completed, reloadCount]);
 
     let returnValue = null;
     const isTextChatRun = workflowRun?.mode === WORKFLOW_RUN_MODES.TEXTCHAT;
@@ -880,6 +901,17 @@ export default function WorkflowRunPage() {
                         <RealtimeFeedback mode="historical" logs={workflowRun?.logs ?? null} />
                     </ConversationRailFrame>
                 </div>
+            </div>
+        );
+    }
+    else if (workflowRun && !workflowRun.is_completed) {
+        returnValue = (
+            <div className={`${RUN_SHELL_HEIGHT_CLASS} min-h-0 w-full overflow-hidden bg-background`}>
+                <LiveCallMonitor
+                    runId={Number(params.runId)}
+                    getAccessToken={auth.getAccessToken}
+                    onCallEnded={() => setLiveCallEnded(true)}
+                />
             </div>
         );
     }
