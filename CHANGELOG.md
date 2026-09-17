@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.47.1 (2026-09-17)
+
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+## What's Changed
+### Bug Fixes
+* fix: add multi locale in answer supervisor by @a6kme in https://github.com/dograh-hq/dograh/pull/782
+* fix: extract node variables when a text chat ends without a transition by @a6kme in https://github.com/dograh-hq/dograh/pull/783
+
+
+**Full Changelog**: https://github.com/dograh-hq/dograh/compare/dograh-v1.47.0...dograh-v1.47.1
+
 ## 1.47.0 (2026-09-15)
 
 <!-- Release notes generated using configuration in .github/release.yml at main -->
